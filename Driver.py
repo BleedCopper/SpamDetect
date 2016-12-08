@@ -3,27 +3,28 @@ import os
 import random
 from operator import itemgetter
 
+import itertools
 from nltk import word_tokenize
 
 
 # folder to list of emails
-def init_lists(folder):
-    a_list = []
+def extract_emails(folder):
+    email_list = []
     file_list = os.listdir(folder)
     spam = 0
     ham = 0
-    for a_file in file_list:
-        f = open(folder + a_file, 'r')
+    for file in file_list:
+        f = open(folder + file, 'r')
 
         # all spam messages start with spmsg
-        if a_file.startswith("spmsg"):
-            a_list.append((f.read(), "spam"))
+        if file.startswith("spmsg"):
+            email_list.append((f.read(), "spam"))
             spam += 1
         else:
-            a_list.append((f.read(), "ham"))
+            email_list.append((f.read(), "ham"))
             ham += 1
     f.close()
-    return spam, ham, a_list
+    return spam, ham, email_list
 
 
 # return sentence into array of words
@@ -37,221 +38,258 @@ def get_features(text):
 
 
 # train NB
-def train(features_train):
-    spamNum = 0
-    voc = {}
-    spamVoc = {}
-    condprob = {}
-    prior = 0
+# SEE: http://blog.datumbox.com/wp-content/uploads/2013/09/naive-bayes-maths9.png
+def train(features_train, attribute_count):
+    spam_count = 0
+    vocabulary = {}
+    spam_vocabulary = {}
+    probability_spam = {}
+    ham_vocabulary = {}
+    probability_ham = {}
 
-    priorh = 0
-    hamVoc = {}
-    condprobh = {}
+    # count number of spam/ham emails that words are present in
     for email in features_train:
-        # print(email[0])
         if (email[1] == "spam"):
-            spamNum += 1
+            spam_count += 1
         for key, value in email[0].items():
-            if key not in voc:
-                voc[key] = 1
-                spamVoc[key] = 0
-                hamVoc[key] = 0
+            if key not in vocabulary:
+                vocabulary[key] = 1
+                spam_vocabulary[key] = 0
+                ham_vocabulary[key] = 0
             else:
-                voc[key] += 1
+                vocabulary[key] += 1
             if (email[1] == "spam"):
-                spamVoc[key] += 1
+                spam_vocabulary[key] += 1
             else:
-                hamVoc[key] += 1
+                ham_vocabulary[key] += 1
 
-    prior = spamNum / len(features_train)
-    priorh = (len(features_train) - spamNum) / len(features_train)
+    prior_spam = spam_count / len(features_train)
+    prior_ham = (len(features_train) - spam_count) / len(features_train)
 
-    # print(prior)
-    for key, value in voc.items():
-        # print(spamVoc[key],spamNum)
-        condprob[key] = (spamVoc[key] + 1) / (spamNum + 2)
-        condprobh[key] = (hamVoc[key] + 1) / ((len(features_train) - spamNum) + 2)
+    # calculate probability of email being spam/ham given a specific word
+    for key, value in vocabulary.items():
+        probability_spam[key] = (spam_vocabulary[key] + 1) / (spam_count + 2)
+        probability_ham[key] = (ham_vocabulary[key] + 1) / ((len(features_train) - spam_count) + 2)
 
-    # print(condprob)
-    newVoc = mutualinf(voc, spamVoc, hamVoc, spamNum, len(features_train))
-    return newVoc, prior, condprob, priorh, condprobh
+    # only use vocabulary with top mutual infos
+    top_vocabulary = mutualinf(vocabulary, spam_vocabulary, ham_vocabulary, spam_count, len(features_train),
+                               attribute_count)
+    return top_vocabulary, prior_spam, probability_spam, prior_ham, probability_ham
 
 
-def evaluate(test_set, voc, prior, condprob, priorh, condprobh, threshold):
-    tp = 0.0
-    tn = 0.0
-    fp = 0.0
-    fn = 0.0
+# return evaluation metrics results
+# SEE: http://blog.datumbox.com/wp-content/uploads/2013/09/naive-bayes-maths9.png
+def evaluate(test_set, vocabulary, prior_spam, probability_spam, prior_ham, probability_ham, threshold):
+    true_positive = 0.0
+    true_negative = 0.0
+    false_positive = 0.0
+    false_negative = 0.0
 
     t = threshold / (1 + threshold)
+
+    # calculate probability of an email being spam/ham
     for email in test_set:
-        score = (prior)
-        scoreh = (priorh)
-        for key in voc:
+        score_spam = math.log(prior_spam)
+        score_ham = math.log(prior_ham)
+        for key in vocabulary:
             if (key in email[0]):
-                score *= (condprob[key])
-                scoreh *= (condprobh[key])
+                score_spam += math.log(probability_spam[key])
+                score_ham += math.log(probability_ham[key])
             else:
-                score *= (1-condprob[key])
-                scoreh *= (1-condprobh[key])
+                score_spam += math.log(1 - probability_spam[key])
+                score_ham += math.log(1 - probability_ham[key])
 
+        # convert from log probability to regular probability
+        score_spam = math.exp(score_spam)
+        score_ham = math.exp(score_ham)
 
+        # normalize
+        score_spam = score_spam / (score_spam + score_ham)
 
-        score = score / (score + scoreh)
-        if (score > t):
+        if (score_spam > t):  # email predicted as spam
             if (email[1] == "spam"):
-                tp += 1
+                true_positive += 1
             else:
-                fp += 1
-        else:
+                false_positive += 1
+        else:  # email predicted as ham
             if (email[1] == "ham"):
-                tn += 1
+                true_negative += 1
             else:
-                fn += 1
+                false_negative += 1
 
-    print(tp, fp, tn, fn)
-    # acc = ((tp + (tn * threshold)) / (tp + ((tn + fp) * threshold) + fn))
-    # recall = (tp / (tp + fn))
-    # precision = (tp / (tp + (fp * threshold)))
-    # err = ((fn + (fp * threshold)) / (tp + ((tn + fp) * threshold) + fn))
-    acc = ((tp + (tn * threshold)) / (tp + ((tn + fp) * threshold) + fn))
-    recall = (tp / (tp + fn))
-    precision = (tp / (tp + (fp)))
-    err = ((fn + (fp * threshold)) / (tp + ((tn + fp) * threshold) + fn))
+    accuracy = ((true_positive + (true_negative * threshold)) / (
+        true_positive + ((true_negative + false_positive) * threshold) + false_negative))
+    recall = (true_positive / (true_positive + false_negative))
+    precision = (true_positive / (true_positive + (false_positive)))
+    error = ((false_negative + (false_positive * threshold)) / (
+        true_positive + ((true_negative + false_positive) * threshold) + false_negative))
 
-    return acc, recall, precision, err
+    return accuracy, recall, precision, error
 
 
-def mutualinf(voc, spamVoc, hamVoc, numSpam, numDoc):
-    list = {}
+# return words with top mutual info
+# SEE: http://stats.stackexchange.com/questions/191604/how-to-calculate-mutual-information-from-frequencies
+def mutualinf(vocabulary, spam_vocabulary, ham_vocabulary, spam_count, doc_count, attribute_count):
+    word_information = {}
     i = 0
-    for key, value in voc.items():
-        sum = 0
+    for key, value in vocabulary.items():
+        information = 0
 
-        # print(spamVoc[key],hamVoc[key])
-        # print(numSpam - spamVoc[key],numDoc-numSpam - hamVoc[key])
-        # print(numDoc)
+        ham_absent = (doc_count - spam_count - ham_vocabulary[
+            key]) / doc_count  # ratio: ham emails that dont have the word
+        ham_present = ham_vocabulary[key] / doc_count  # ratio: ham emails that has the word
+        spam_absent = (spam_count - spam_vocabulary[key]) / doc_count  # ratio: spam emails that dont have the word
+        spam_present = spam_vocabulary[key] / doc_count  # ratio: spam emails that has the word
 
-        c0x0 = (numDoc-numSpam - hamVoc[key]) / numDoc
-        c0x1 = hamVoc[key] / numDoc
-        c1x0 = (numSpam - spamVoc[key]) / numDoc
-        c1x1 = spamVoc[key] / numDoc
-
-        c0 = c0x0 + c0x1
-        c1 = c1x0 + c1x1
-        x0 = c0x0 + c1x0
-        x1 = c0x1 + c1x1
-
-        #               c = 1                c = 0
-        # x = 1      spamVoc[key]            hamVoc[key]
-        # x = 0   numSpam - spamVoc[key]  numDoc-numSpam - hamVoc[key]
+        ham = ham_absent + ham_present  # ratio: ham emails
+        spam = spam_absent + spam_present  # ratio: spam emails
+        absent = ham_absent + spam_absent  # ratio: emails without the word
+        present = ham_present + spam_present  # ratio: emails that has the word
 
         # x=0; c=spam
         try:
-            sum += ((c1x0)*math.log((c1x0/(c1*x0)),2))
+            information += ((spam_absent) * math.log((spam_absent / (spam * absent)), 2))
         except:
-            sum += 0
+            information += 0
         # x=1; c=spam
         try:
-            sum += ((c1x1)*math.log((c1x1/(c1*x1)),2))
+            information += ((spam_present) * math.log((spam_present / (spam * present)), 2))
         except:
-            sum += 0
+            information += 0
         # x=0; c=legit
         try:
-            sum += ((c0x0)*math.log((c0x0/(c0*x0)),2))
+            information += ((ham_absent) * math.log((ham_absent / (ham * absent)), 2))
         except:
-            sum += 0
+            information += 0
         # x=1; c=legit
         try:
-            sum += ((c0x1)*math.log((c0x1/(c0*x1)),2))
+            information += ((ham_present) * math.log((ham_present / (ham * present)), 2))
         except:
-            sum += 0
-        list[key] = sum
+            information += 0
+        word_information[key] = information
 
-    sort = sorted(list.items(), key=itemgetter(1), reverse=True)
+    # sort words by information score
+    sort = sorted(word_information.items(), key=itemgetter(1), reverse=True)
 
-    newVoc = []
-    for i in range(200):
-        newVoc.append(sort[i][0])
-        # print(newVoc[i], sort[i][1], spamVoc[newVoc[i]], hamVoc[newVoc[i]])
-        # print(newVoc2[i], sort2[i][1], spamVoc[newVoc2[i]], hamVoc[newVoc2[i]])
+    # only take top N words
+    top_information = []
+    for i in range(attribute_count):
+        top_information.append(sort[i][0])
 
-    print("FIRST", newVoc)
-
-    return newVoc
+    return top_information
 
 
-types = ["bare", "lemm", "lemm_stop", "stop"]
-att_num = [50, 50, 100, 100]
+# train and evaluate given parameters
+def naive_bayes(type, threshold, attribute_count, train_portion):
+    accuracy_base_list = []
+    accuracy_list = []
+    tcr_list = []
+    recall_list = []
+    precision_list = []
 
-# One training and evaluation run for BARE dataset on lambda=1 using ten-fold cross-validation
-threshold = 999  # lambda
-accuracy_base = 0
-accuracy = 0
-tcr = 0
-recall = 0
-precision = 0
-err_acc=0
-error_base=0
+    # ten-fold
+    for i in range(10):
+        train_list = []
+        test_list = []
+        spam_count = 0
+        ham_count = 0
+        file_list = os.listdir("dataset/" + type)
 
-# ten-fold
-for i in range(10):
-    train_list = []
-    test_list = []
-    spam = 0
-    ham = 0
-    file_list = os.listdir("dataset/bare")
+        # get all parts
+        for j, file in zip(range(10), file_list):
+            # get one as test data
+            if (i == j):
+                spam, ham, test_list = extract_emails("dataset/" + type + "/" + file + "/")
+                spam_count += spam
+                ham_count += ham
 
-    # get all parts
-    for j, file in zip(range(10), file_list):
-        # get one as test data
-        if (i == j):
-            a, b, test_list = init_lists("dataset/bare/" + file + "/")
-            spam += a
-            ham += b
+            # the rest are training data
+            else:
+                spam, ham, temp_list = extract_emails("dataset/" + type + "/" + file + "/")
+                random.shuffle(temp_list)
+                train_list.extend(itertools.islice(temp_list, 0, (int)(len(temp_list) * train_portion)))
 
-        # the rest are training data
-        else:
-            a, b, list = init_lists("dataset/bare/" + file + "/")
-            train_list.extend(list)
+        accuracy_base_list.append((threshold * ham_count) / ((threshold * ham_count) + spam_count))
+        error_base = spam_count / ((threshold * ham_count) + spam_count)
 
-    # print(len(train_list), len(test_list), spam, ham)
+        # shuffles the lists
+        random.shuffle(test_list)
+        random.shuffle(train_list)
 
-    acc_base = (threshold * ham) / ((threshold * ham) + spam)
-    err_base = spam / ((threshold * ham) + spam)
+        # get the features(words) per email
+        test_features = [(get_features(email), label) for (email, label) in test_list]
+        train_features = [(get_features(email), label) for (email, label) in train_list]
 
-    # shuffles the lists
-    random.shuffle(test_list)
-    random.shuffle(train_list)
+        # training
+        vocabulary, prior_spam, probability_spam, prior_ham, probability_ham = train(train_features, attribute_count)
 
-    # get the features per email
-    test_features = [(get_features(email), label) for (email, label) in test_list]
-    train_features = [(get_features(email), label) for (email, label) in train_list]
+        # evaluating
+        accuracy, recall, precision, error = evaluate(test_features, vocabulary, prior_spam, probability_spam,
+                                                      prior_ham, probability_ham, threshold)
 
-    # training
-    voc, prior, condprob, priorh, condprobh = train(train_features)
+        accuracy_list.append(accuracy)
+        tcr_list.append(error_base / error)
+        recall_list.append(recall)
+        precision_list.append(precision)
 
-    # evaluating
-    acc, rec, prec, err = evaluate(test_features, voc, prior, condprob, priorh, condprobh, threshold)
-
-    # evaluate(test_features, voc, prior, condprob, priorh, condprobh, threshold)
-    #
-    # if err > 0:
-    tcr_temp = err_base / err
-    # else:
-    #     tcr_temp = 0
-
-    # accumulate for the ten-fold
-    accuracy_base += acc_base
-    accuracy += acc
-    precision += prec
-    recall += rec
-    tcr += tcr_temp
-    err_acc+=err
-    error_base+=err_base
+    print(tcr_list)
+    print(sum(recall_list) / 10, sum(precision_list) / 10, sum(accuracy_list) / 10, sum(accuracy_base_list) / 10,
+          sum(tcr_list) / 10)
+    return sum(recall_list) / 10, sum(precision_list) / 10, sum(accuracy_list) / 10, sum(accuracy_base_list) / 10, sum(
+        tcr_list) / 10
 
 
-    print(tcr_temp, tcr)
-#
-# # get average
-print(recall / 10, precision / 10, accuracy / 10, accuracy_base / 10, tcr / 10, (error_base/err_acc))
+# -----------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------
+# MAIN PROGRAM
+
+types = ["bare", "stop", "lemm", "lemm_stop"]
+thresholds = [1, 9, 999]
+
+# 1. Table 2
+naive_bayes(types[0], 1, 50, 1)
+naive_bayes(types[1], 1, 50, 1)
+naive_bayes(types[2], 1, 100, 1)
+naive_bayes(types[3], 1, 100, 1)
+naive_bayes(types[0], 9, 200, 1)
+naive_bayes(types[1], 9, 200, 1)
+naive_bayes(types[2], 9, 100, 1)
+naive_bayes(types[3], 9, 100, 1)
+naive_bayes(types[0], 999, 200, 1)
+naive_bayes(types[1], 999, 200, 1)
+naive_bayes(types[2], 999, 300, 1)
+naive_bayes(types[0], 999, 300, 1)
+
+# 2. Figure 1 *not sure about attribute count
+for type in types:
+    naive_bayes(type, 1, 50, 1)
+
+# 3. Figure 2 *not sure about attribute count
+for type in types:
+    naive_bayes(type, 9, 50, 1)
+
+# 4. Figure 3 *not sure about attribute count
+for type in types:
+    naive_bayes(type, 999, 50, 1)
+
+# 5. Figure 4
+for type in types:
+    for attribute_count in range(50, 701, 50):
+        naive_bayes(type, 1, attribute_count, 1)
+
+# 6. Figure 5
+for type in types:
+    for attribute_count in range(50, 701, 50):
+        naive_bayes(type, 9, attribute_count, 1)
+
+# 7. Figure 6
+for type in types:
+    for attribute_count in range(50, 701, 50):
+        naive_bayes(type, 999, attribute_count, 1)
+
+# 8. Figure 7
+for train_portion in range(10, 101, 10):
+    naive_bayes(types[3], 1, 100, train_portion / 100)
+    naive_bayes(types[3], 9, 100, train_portion / 100)
+    naive_bayes(types[3], 999, 300, train_portion / 100)
